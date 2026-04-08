@@ -286,6 +286,140 @@ def _format_section(title: str, teams: List[dict], ranked: bool = True) -> List[
     return lines
 
 
+def _standings_dict_sort_key(team: dict):
+    return (
+        -team["points"],
+        -team["regulation_wins"],
+        -team["row"],
+        -team["wins"],
+        -team["goal_diff"],
+        -team["goals_for"],
+        team["team"],
+    )
+
+
+def _first_round_matchups_for_conference(conference_data: dict) -> List[str]:
+    division_spots = conference_data["division_spots"]
+    wildcards = conference_data["wildcards"]
+
+    if len(wildcards) < 2:
+        return ["Not enough teams to determine first-round matchups"]
+
+    division_winners = []
+    for division, teams in division_spots.items():
+        if len(teams) >= 3:
+            division_winners.append((division, teams[0]))
+
+    if len(division_winners) < 2:
+        return ["Not enough division winners to determine first-round matchups"]
+
+    division_winners.sort(key=lambda item: _standings_dict_sort_key(item[1]))
+
+    top_division, top_winner = division_winners[0]
+    other_division, other_winner = division_winners[1]
+
+    top_division_teams = division_spots[top_division]
+    other_division_teams = division_spots[other_division]
+
+    return [
+        f"{top_winner['team']} (1) vs {wildcards[1]['team']} (WC2)",
+        f"{other_winner['team']} (1) vs {wildcards[0]['team']} (WC1)",
+        f"{top_division_teams[1]['team']} (2) vs {top_division_teams[2]['team']} (3)",
+        f"{other_division_teams[1]['team']} (2) vs {other_division_teams[2]['team']} (3)",
+    ]
+
+
+def format_first_round_matchups_from_standings(standings_rows) -> str:
+    wc = wildcard_standings(standings_rows)
+    lines = ["NHL FIRST ROUND MATCHUPS IF SEASON ENDS AS PROJECTED", ""]
+
+    for conference in ("East", "West"):
+        lines.append(f"=== {conference.upper()}ERN CONFERENCE ===")
+        lines.append("")
+
+        for matchup in _first_round_matchups_for_conference(wc[conference]):
+            lines.append(matchup)
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def print_first_round_matchups_from_standings(standings_rows):
+    print(format_first_round_matchups_from_standings(standings_rows))
+
+
+def _first_round_matchups_from_odds_conference_rows(rows: list) -> List[str]:
+    divisions = {}
+    for row in rows:
+        divisions.setdefault(row["division"], []).append(row)
+
+    sorted_divisions = {
+        division: sorted(rows, key=lambda r: (-r["percent_in"], r["team"]))
+        for division, rows in divisions.items()
+    }
+
+    division_names = sorted(sorted_divisions.keys())
+    automatic_qualifiers = []
+
+    for division in division_names:
+        automatic_qualifiers.extend(sorted_divisions[division][:3])
+
+    auto_teams = {row["team"] for row in automatic_qualifiers}
+    remaining = [row for row in rows if row["team"] not in auto_teams]
+    remaining_sorted = sorted(remaining, key=lambda r: (-r["percent_in"], r["team"]))
+
+    wildcards = remaining_sorted[:2]
+
+    if len(division_names) < 2 or len(wildcards) < 2:
+        return ["Not enough teams to determine first-round matchups"]
+
+    division_winners = [
+        (division, sorted_divisions[division][0])
+        for division in division_names
+        if len(sorted_divisions[division]) >= 3
+    ]
+
+    if len(division_winners) < 2:
+        return ["Not enough division winners to determine first-round matchups"]
+
+    division_winners.sort(key=lambda item: (-item[1]["percent_in"], item[1]["team"]))
+
+    top_division, top_winner = division_winners[0]
+    other_division, other_winner = division_winners[1]
+
+    top_division_teams = sorted_divisions[top_division]
+    other_division_teams = sorted_divisions[other_division]
+
+    return [
+        f"{top_winner['team']} (1) vs {wildcards[1]['team']} (WC2)",
+        f"{other_winner['team']} (1) vs {wildcards[0]['team']} (WC1)",
+        f"{top_division_teams[1]['team']} (2) vs {top_division_teams[2]['team']} (3)",
+        f"{other_division_teams[1]['team']} (2) vs {other_division_teams[2]['team']} (3)",
+    ]
+
+
+def format_first_round_matchups_from_odds(results_by_conference) -> str:
+    lines = ["NHL FIRST ROUND MATCHUPS BASED ON PLAYOFF ODDS", ""]
+
+    for conference in ("East", "West"):
+        lines.append(f"=== {conference.upper()}ERN CONFERENCE ===")
+        lines.append("")
+
+        for matchup in _first_round_matchups_from_odds_conference_rows(
+            results_by_conference[conference]
+        ):
+            lines.append(matchup)
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def print_first_round_matchups_from_odds(results_by_conference):
+    print(format_first_round_matchups_from_odds(results_by_conference))
+
+
 def format_wildcard_standings(season: str) -> str:
     standings = get_wildcard_standings(season)
     lines = [f"NHL WILDCARD STANDINGS FOR {season}", ""]
@@ -1007,12 +1141,54 @@ def print_playoff_odds_by_conference(results_by_conference, moe: float):
             f"{row['percent_in']:.1f}% ± {moe:.1f}%"
         )
 
-def print_playoff_odds_by_wildcard(results_by_conference, moe: float, num_sims: int):
-    def format_odds_line(row: dict, rank=None) -> str:
-        rank_text = f"{rank:>2}. " if rank is not None else "   "
-        return f"{rank_text}{row['team']:<4} {row['percent_in']:>5.1f}% {row['division']}"
+def print_playoff_odds_by_wildcard(results_by_conference, moe: float, num_sims: int, projected_presidents_team: str | None):
+    def simple_status_for_team(
+        row: dict,
+        *,
+        division_rank: int | None,
+        conference_rank: int | None,
+        presidents_team: str | None,
+    ) -> str | None:
+        pct = row["percent_in"]
+        team = row["team"]
 
-    def print_conference(conference_name: str, rows: list):
+        if pct <= 0.05:
+            return "Eliminated"
+
+        if pct < 99.95:
+            return None
+
+        if presidents_team and team == presidents_team:
+            return "Presidents Trophy"
+        if conference_rank == 1:
+            return "clinched conference"
+        if division_rank == 1:
+            return "clinched division"
+        return "Clinched"
+    def format_odds_line(row: dict, rank=None, status=None) -> str:
+        rank_text = f"{rank:>2}. " if rank is not None else " "
+
+        if status:
+            # Example: " 1. BUF Clinched Atlantic"
+            return f"{rank_text}{row['team']:<4} {status} {row['division']}"
+
+        # Default to percentage text
+        pct = row["percent_in"]
+        if abs(pct - 100.0) < 0.05:
+            pct_text = "100"
+        elif abs(pct - 0.0) < 0.05:
+            pct_text = "0"
+        else:
+            pct_text = f"{pct:>5.1f}"
+
+        return f"{rank_text}{row['team']:<4} {pct_text}% {row['division']}"
+
+    # Build global ranking across both conferences
+    all_rows = results_by_conference["East"] + results_by_conference["West"]
+    global_sorted = sorted(all_rows, key=lambda r: (-r["percent_in"], r["team"]))
+    global_rank_map = {row["team"]: i + 1 for i, row in enumerate(global_sorted)}
+
+    def print_conference(conference_name: str, rows: list, global_rank_map: dict[str, int]):
         print("=" * 48)
         print(f"{conference_name.upper()}ERN CONFERENCE")
         print("=" * 48)
@@ -1026,6 +1202,21 @@ def print_playoff_odds_by_wildcard(results_by_conference, moe: float, num_sims: 
             for division, rows in divisions.items()
         }
 
+        division_names = sorted(sorted_divisions.keys())
+        automatic_qualifiers = []
+
+        # Division ranks per team
+        division_rank_map: dict[str, int] = {}
+        for division in division_names:
+            for i, row in enumerate(sorted_divisions[division], start=1):
+                division_rank_map[row["team"]] = i
+
+        conference_rank_map = {}
+        # Rank within conference by odds
+        conference_sorted = sorted(rows, key=lambda r: (-r["percent_in"], r["team"]))
+        for i, row in enumerate(conference_sorted, start=1):
+            conference_rank_map[row["team"]] = i
+
         automatic_qualifiers = []
         division_names = sorted(sorted_divisions.keys())
 
@@ -1033,7 +1224,14 @@ def print_playoff_odds_by_wildcard(results_by_conference, moe: float, num_sims: 
             top_three = sorted_divisions[division][:3]
             print(f"{division.upper()} DIVISION")
             for index, row in enumerate(top_three, start=1):
-                print(format_odds_line(row, index))
+                team = row["team"]
+                status = simple_status_for_team(
+                    row,
+                    division_rank=division_rank_map.get(team),
+                    conference_rank=conference_rank_map.get(team),
+                    presidents_team=projected_presidents_team,
+                )
+                print(format_odds_line(row, index, status=status))
             print()
             automatic_qualifiers.extend(top_three)
 
@@ -1046,24 +1244,41 @@ def print_playoff_odds_by_wildcard(results_by_conference, moe: float, num_sims: 
 
         print(f"{conference_name.upper()}ERN CONFERENCE WILD CARD")
         for index, row in enumerate(wildcards, start=1):
-            print(format_odds_line(row, index))
+            team = row["team"]
+            status = simple_status_for_team(
+                row,
+                division_rank=division_rank_map.get(team),
+                conference_rank=conference_rank_map.get(team),
+                presidents_team=projected_presidents_team,
+            )
+            print(format_odds_line(row, index, status=status))
         print()
 
         if outside:
             print(f"{conference_name.upper()}ERN CONFERENCE OUTSIDE")
             print("=" * 48)
             for row in outside:
-                print(format_odds_line(row))
+                team = row["team"]
+                status = simple_status_for_team(
+                    row,
+                    division_rank=division_rank_map.get(team),
+                    conference_rank=conference_rank_map.get(team),
+                    presidents_team=projected_presidents_team,
+                )
+                print(format_odds_line(row, status=status))
             print()
 
+    today = datetime.now().strftime("%A, %B %d, %Y %H:%M:%S")
     print("=" * 48)
+    print(today)
+    print("-" * 48)
     print("PLAYOFF ODDS AS WILDCARD STANDINGS")
     print(f"Margin of error (95%): ± {moe:.1f} percentage points")
     print("=" * 48)
     print()
 
-    print_conference("East", results_by_conference["East"])
-    print_conference("West", results_by_conference["West"])
+    print_conference("East", results_by_conference["East"], global_rank_map)
+    print_conference("West", results_by_conference["West"], global_rank_map)
 
 def expected_regular_season_games(season: str) -> int:
     start_year = int(season[:4])
@@ -1096,6 +1311,16 @@ def playoff_odds(season: str,num_sims: int):
         for team_code in TEAM_TO_DIVISION
     }
 
+    # New: track projected points across simulations
+    projected_points_totals = {
+        team_code: 0
+        for team_code in TEAM_TO_DIVISION
+    }
+    # Optional: track how often each team finishes overall #1
+    projected_overall_1_finishes = {
+        team_code: 0
+        for team_code in TEAM_TO_DIVISION
+    }
 
     if is_regular_season_in_progress(season):
 
@@ -1104,6 +1329,16 @@ def playoff_odds(season: str,num_sims: int):
         for _ in range(num_sims):
             sim_games = sim_end_of_season(past_games, new_games)
             standings = standings_from_game_scores(sim_games)
+
+            # standings is already sorted with your tie-breakers (_standings_sort_key)
+            # 1) accumulate projected points
+            for team in standings:
+                projected_points_totals[team.team] += team.points
+
+            # 2) track projected overall #1 finishes
+            if standings:
+                projected_overall_1_finishes[standings[0].team] += 1
+
             wc = wildcard_standings(standings)
 
             playoff_teams = set()
@@ -1122,13 +1357,31 @@ def playoff_odds(season: str,num_sims: int):
                 else:
                     team_counters[team_code]["out"] += 1
         
-   
+        # Compute average projected points per team (for later use)
+        avg_projected_points = {}
+        if num_sims > 0:
+            for team_code in TEAM_TO_DIVISION:
+                avg_projected_points[team_code] = projected_points_totals[team_code] / num_sims
+        
+            # Pick projected Presidents Trophy based on highest avg projected points
+            projected_presidents_team = max(
+                avg_projected_points.items(),
+                key=lambda item: (item[1], item[0]),
+            )[0]
+        else:
+            projected_presidents_team = None
+
         results = sorted_playoff_odds_results(team_counters)
         results_by_conference = sorted_playoff_odds_results_by_conference(team_counters)
         # print_playoff_odds_by_conference(results_by_conference, moe)
-        print_playoff_odds_by_wildcard(results_by_conference, moe, num_sims)
+        print_playoff_odds_by_wildcard(results_by_conference, moe, num_sims, projected_presidents_team)
+
+        print_first_round_matchups_from_odds(results_by_conference)
+
     else:
         print("Regular season is over no simulation was run")
+
+
 
     elapsed = perf_counter() - start_time
     print(f"\nElapsed time: {elapsed:.3f} seconds")
@@ -1172,7 +1425,7 @@ def simulate_season_with_synthetic_result(
         g for g in new_games if g.game_id != synthetic_game.game_id
     ]
 
-    # 3) Run your usual MC loop
+    # 3) Run usual MC loop
     team_counters = {
         team_code: {"in": 0, "out": 0}
         for team_code in TEAM_TO_DIVISION

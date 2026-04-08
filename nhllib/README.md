@@ -11,6 +11,7 @@ pip install -e .
 ## Commands
 
 ```bash
+python3 -c 'import nhltools.playoff_odds as po; po.playoff_odds("20252026",16000)
 nhl today
 nhl schedule-day 2026-04-03
 nhl scores-day 2026-04-03
