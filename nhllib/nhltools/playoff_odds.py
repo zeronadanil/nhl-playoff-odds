@@ -297,6 +297,17 @@ def _standings_dict_sort_key(team: dict):
         team["team"],
     )
 
+def _projected_standings_row_sort_key(team: dict):
+    return (
+        -team.get("projected_points", 0.0),
+        -team.get("projected_regulation_wins", 0.0),
+        -team.get("projected_row", 0.0),
+        -team.get("projected_wins", 0.0),
+        -team.get("projected_goal_diff", 0.0),
+        -team.get("projected_goals_for", 0.0),
+        -team.get("percent_in", 0.0),
+        team["team"],
+    )
 
 def _first_round_matchups_for_conference(conference_data: dict) -> List[str]:
     division_spots = conference_data["division_spots"]
@@ -358,10 +369,9 @@ def _first_round_matchups_from_odds_conference_rows(
         divisions.setdefault(row["division"], []).append(row)
 
     sorted_divisions = {
-        division: sorted(rows, key=lambda r: (-r["percent_in"], r["team"]))
+        division: sorted(rows, key=_projected_standings_row_sort_key)
         for division, rows in divisions.items()
     }
-
     division_names = sorted(sorted_divisions.keys())
     automatic_qualifiers = []
 
@@ -370,7 +380,7 @@ def _first_round_matchups_from_odds_conference_rows(
 
     auto_teams = {row["team"] for row in automatic_qualifiers}
     remaining = [row for row in rows if row["team"] not in auto_teams]
-    remaining_sorted = sorted(remaining, key=lambda r: (-r["percent_in"], r["team"]))
+    remaining_sorted = sorted(remaining, key=_projected_standings_row_sort_key)
 
     wildcards = remaining_sorted[:2]
 
@@ -1275,7 +1285,7 @@ def print_playoff_odds_by_wildcard(
             divisions.setdefault(row["division"], []).append(row)
 
         sorted_divisions = {
-            division: sorted(rows, key=lambda r: (-r["percent_in"], r["team"]))
+            division: sorted(rows, key=_projected_standings_row_sort_key)
             for division, rows in divisions.items()
         }
 
@@ -1308,14 +1318,14 @@ def print_playoff_odds_by_wildcard(
                     conference_winner=conference_winner,
                     div_winners=div_winners,
                 )
-                proj = avg_projected_points.get(team)
+                proj = row.get("projected_points")
                 print(format_odds_line(row, index, status=status, projected_pts=proj))
             print()
             automatic_qualifiers.extend(top_three)
 
         auto_teams = {row["team"] for row in automatic_qualifiers}
         remaining = [row for row in rows if row["team"] not in auto_teams]
-        remaining_sorted = sorted(remaining, key=lambda r: (-r["percent_in"], r["team"]))
+        remaining_sorted = sorted(remaining, key=_projected_standings_row_sort_key)
 
         wildcards = remaining_sorted[:2]
         outside_unsorted = remaining_sorted[2:]
@@ -1335,7 +1345,7 @@ def print_playoff_odds_by_wildcard(
                 conference_winner=conference_winner,
                 div_winners=div_winners,
             )
-            proj = avg_projected_points.get(team)
+            proj = row.get("projected_points")
             print(format_odds_line(row, index, status=status, projected_pts=proj))
         print()
 
@@ -1350,7 +1360,7 @@ def print_playoff_odds_by_wildcard(
                     conference_winner=conference_winner,
                     div_winners=div_winners,
                 )
-                proj = avg_projected_points.get(team)
+                proj = row.get("projected_points")
                 print(format_odds_line(row, status=status, projected_pts=proj))
             print()
 
@@ -1403,6 +1413,28 @@ def playoff_odds(season: str,num_sims: int):
         for team_code in TEAM_TO_DIVISION
     }
 
+    projected_regulation_wins_totals = {
+        team_code: 0
+        for team_code in TEAM_TO_DIVISION
+    }
+    projected_row_totals = {
+        team_code: 0
+        for team_code in TEAM_TO_DIVISION
+    }
+    projected_wins_totals = {
+        team_code: 0
+        for team_code in TEAM_TO_DIVISION
+    }
+    projected_goal_diff_totals = {
+        team_code: 0
+        for team_code in TEAM_TO_DIVISION
+    }
+    projected_goals_for_totals = {
+        team_code: 0
+        for team_code in TEAM_TO_DIVISION
+    }
+
+
     # New: how often each team finishes 1st overall / in conference / in division
     overall_1_counts = {
         team_code: 0
@@ -1435,6 +1467,11 @@ def playoff_odds(season: str,num_sims: int):
             # 1) accumulate projected points
             for team in standings:
                 projected_points_totals[team.team] += team.points
+                projected_regulation_wins_totals[team.team] += team.regulation_wins
+                projected_row_totals[team.team] += team.row
+                projected_wins_totals[team.team] += team.wins
+                projected_goal_diff_totals[team.team] += team.goal_diff
+                projected_goals_for_totals[team.team] += team.goals_for
 
             # 2) track projected overall #1 finishes
             if standings:
@@ -1475,29 +1512,36 @@ def playoff_odds(season: str,num_sims: int):
                 else:
                     team_counters[team_code]["out"] += 1
         
-        # Compute average projected points per team (for later use)
-        avg_projected_points = {}
-        if num_sims > 0:
-            for team_code in TEAM_TO_DIVISION:
-                avg_projected_points[team_code] = projected_points_totals[team_code] / num_sims
-        
-            # Pick projected Presidents Trophy based on highest avg projected points
-            projected_presidents_team = max(
-                avg_projected_points.items(),
-                key=lambda item: (item[1], item[0]),
-            )[0]
-        else:
-            projected_presidents_team = None
-        
-        # Compute average projected points per team
-        avg_projected_points = {}
-        if num_sims > 0:
-            for team_code in TEAM_TO_DIVISION:
-                avg_projected_points[team_code] = (
-                    projected_points_totals[team_code] / num_sims
-                )
-        else:
-            avg_projected_points = {team_code: 0.0 for team_code in TEAM_TO_DIVISION}
+            avg_projected_points = {}
+            avg_projected_regulation_wins = {}
+            avg_projected_row = {}
+            avg_projected_wins = {}
+            avg_projected_goal_diff = {}
+            avg_projected_goals_for = {}
+
+            if num_sims > 0:
+                for team_code in TEAM_TO_DIVISION:
+                    avg_projected_points[team_code] = projected_points_totals[team_code] / num_sims
+                    avg_projected_regulation_wins[team_code] = projected_regulation_wins_totals[team_code] / num_sims
+                    avg_projected_row[team_code] = projected_row_totals[team_code] / num_sims
+                    avg_projected_wins[team_code] = projected_wins_totals[team_code] / num_sims
+                    avg_projected_goal_diff[team_code] = projected_goal_diff_totals[team_code] / num_sims
+                    avg_projected_goals_for[team_code] = projected_goals_for_totals[team_code] / num_sims
+
+                projected_presidents_team = max(
+                    avg_projected_points.items(),
+                    key=lambda item: (item[1], item[0]),
+                )[0]
+            else:
+                for team_code in TEAM_TO_DIVISION:
+                    avg_projected_points[team_code] = 0.0
+                    avg_projected_regulation_wins[team_code] = 0.0
+                    avg_projected_row[team_code] = 0.0
+                    avg_projected_wins[team_code] = 0.0
+                    avg_projected_goal_diff[team_code] = 0.0
+                    avg_projected_goals_for[team_code] = 0.0
+
+                projected_presidents_team = None
 
         # Convert 1st-place counts to probabilities
         overall_1_prob = {}
@@ -1568,8 +1612,21 @@ def playoff_odds(season: str,num_sims: int):
         results = sorted_playoff_odds_results(team_counters)
         results_by_conference = sorted_playoff_odds_results_by_conference(team_counters)
 
+        projected_results_by_conference = {"East": [], "West": []}
+
+        for conference in ("East", "West"):
+            for row in results_by_conference[conference]:
+                new_row = dict(row)
+                new_row["projected_points"] = avg_projected_points.get(row["team"], 0.0)
+                new_row["projected_regulation_wins"] = avg_projected_regulation_wins.get(row["team"], 0.0)
+                new_row["projected_row"] = avg_projected_row.get(row["team"], 0.0)
+                new_row["projected_wins"] = avg_projected_wins.get(row["team"], 0.0)
+                new_row["projected_goal_diff"] = avg_projected_goal_diff.get(row["team"], 0.0)
+                new_row["projected_goals_for"] = avg_projected_goals_for.get(row["team"], 0.0)
+                projected_results_by_conference[conference].append(new_row)
+
         print_playoff_odds_by_wildcard(
-            results_by_conference,
+            projected_results_by_conference,
             moe,
             num_sims,
             presidents_team,
@@ -1580,7 +1637,7 @@ def playoff_odds(season: str,num_sims: int):
         )
 
         print_first_round_matchups_from_odds(
-            results_by_conference,
+            projected_results_by_conference,
             east_conf_winner,
             west_conf_winner,
         )
@@ -1641,6 +1698,26 @@ def simulate_season_with_synthetic_result(
         team_code: 0
         for team_code in TEAM_TO_DIVISION
     }
+    projected_regulation_wins_totals = {
+        team_code: 0
+        for team_code in TEAM_TO_DIVISION
+    }
+    projected_row_totals = {
+        team_code: 0
+        for team_code in TEAM_TO_DIVISION
+    }
+    projected_wins_totals = {
+        team_code: 0
+        for team_code in TEAM_TO_DIVISION
+    }
+    projected_goal_diff_totals = {
+        team_code: 0
+        for team_code in TEAM_TO_DIVISION
+    }
+    projected_goals_for_totals = {
+        team_code: 0
+        for team_code in TEAM_TO_DIVISION
+    }
 
     overall_1_counts = {
         team_code: 0
@@ -1664,6 +1741,11 @@ def simulate_season_with_synthetic_result(
         # 1) accumulate projected points for this simulated season
         for team in standings:
             projected_points_totals[team.team] += team.points
+            projected_regulation_wins_totals[team.team] += team.regulation_wins
+            projected_row_totals[team.team] += team.row
+            projected_wins_totals[team.team] += team.wins
+            projected_goal_diff_totals[team.team] += team.goal_diff
+            projected_goals_for_totals[team.team] += team.goals_for
 
         # 2) record overall #1 finish (sorted by your tie-breaker)
         if standings:
@@ -1703,15 +1785,36 @@ def simulate_season_with_synthetic_result(
                 team_counters[team_code]["out"] += 1
 
 
-    # Compute average projected points per team
-    avg_projected_points = {}
-    if num_sims > 0:
-        for team_code in TEAM_TO_DIVISION:
-            avg_projected_points[team_code] = (
-                projected_points_totals[team_code] / num_sims
-            )
-    else:
-        avg_projected_points = {team_code: 0.0 for team_code in TEAM_TO_DIVISION}
+        avg_projected_points = {}
+        avg_projected_regulation_wins = {}
+        avg_projected_row = {}
+        avg_projected_wins = {}
+        avg_projected_goal_diff = {}
+        avg_projected_goals_for = {}
+
+        if num_sims > 0:
+            for team_code in TEAM_TO_DIVISION:
+                avg_projected_points[team_code] = projected_points_totals[team_code] / num_sims
+                avg_projected_regulation_wins[team_code] = projected_regulation_wins_totals[team_code] / num_sims
+                avg_projected_row[team_code] = projected_row_totals[team_code] / num_sims
+                avg_projected_wins[team_code] = projected_wins_totals[team_code] / num_sims
+                avg_projected_goal_diff[team_code] = projected_goal_diff_totals[team_code] / num_sims
+                avg_projected_goals_for[team_code] = projected_goals_for_totals[team_code] / num_sims
+
+            projected_presidents_team = max(
+                avg_projected_points.items(),
+                key=lambda item: (item[1], item[0]),
+            )[0]
+        else:
+            for team_code in TEAM_TO_DIVISION:
+                avg_projected_points[team_code] = 0.0
+                avg_projected_regulation_wins[team_code] = 0.0
+                avg_projected_row[team_code] = 0.0
+                avg_projected_wins[team_code] = 0.0
+                avg_projected_goal_diff[team_code] = 0.0
+                avg_projected_goals_for[team_code] = 0.0
+
+            projected_presidents_team = None
 
     # Convert 1st-place counts to probabilities
     overall_1_prob = {}
@@ -1780,8 +1883,22 @@ def simulate_season_with_synthetic_result(
         div_winners[division_name] = pick_div_winner(division_name)
 
     results_by_conference = sorted_playoff_odds_results_by_conference(team_counters)
+
+    projected_results_by_conference = {"East": [], "West": []}
+
+    for conference in ("East", "West"):
+        for row in results_by_conference[conference]:
+            new_row = dict(row)
+            new_row["projected_points"] = avg_projected_points.get(row["team"], 0.0)
+            new_row["projected_regulation_wins"] = avg_projected_regulation_wins.get(row["team"], 0.0)
+            new_row["projected_row"] = avg_projected_row.get(row["team"], 0.0)
+            new_row["projected_wins"] = avg_projected_wins.get(row["team"], 0.0)
+            new_row["projected_goal_diff"] = avg_projected_goal_diff.get(row["team"], 0.0)
+            new_row["projected_goals_for"] = avg_projected_goals_for.get(row["team"], 0.0)
+            projected_results_by_conference[conference].append(new_row)
+
     print_playoff_odds_by_wildcard(
-        results_by_conference,
+        projected_results_by_conference,
         moe,
         num_sims,
         presidents_team,
@@ -1790,7 +1907,6 @@ def simulate_season_with_synthetic_result(
         div_winners,
         avg_projected_points,
     )
-
     return team_counters
 
 def simulate_next_game_score_scenario(season: str, team: str, num_sims: int, team_score: int, oponent_score: int, result_type: str):
